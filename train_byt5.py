@@ -231,6 +231,13 @@ def main():
         logger.info(f'Loading pre-tokenized dataset: {args.tokenized_data}')
         tokenized_datasets = load_from_disk(args.tokenized_data)
         
+        # Remove unexpected columns
+        for split in list(tokenized_datasets.keys()):
+            cols = tokenized_datasets[split].column_names
+            keep = [c for c in cols if c in ['input_ids', 'attention_mask', 'labels']]
+            if len(keep) != len(cols):
+                tokenized_datasets[split] = tokenized_datasets[split].remove_columns([c for c in cols if c not in keep])
+        
         # Split if not already a DatasetDict with train/val/test
         if not isinstance(tokenized_datasets, DatasetDict) or not all(k in tokenized_datasets for k in ['train', 'validation', 'test']):
             logger.info('Splitting pre-tokenized dataset...')
@@ -275,6 +282,12 @@ def main():
         if os.path.exists(tokenized_cache_dir):
             logger.info(f'Loading tokenized dataset from cache: {tokenized_cache_dir}')
             tokenized_datasets = load_from_disk(tokenized_cache_dir)
+            # Remove any unexpected columns
+            for split in tokenized_datasets:
+                cols = tokenized_datasets[split].column_names
+                keep = [c for c in cols if c in ['input_ids', 'attention_mask', 'labels']]
+                if len(keep) != len(cols):
+                    tokenized_datasets[split] = tokenized_datasets[split].remove_columns([c for c in cols if c not in keep])
         else:
             def _preprocess(examples):
                 return preprocess_function(examples, tokenizer, args)
