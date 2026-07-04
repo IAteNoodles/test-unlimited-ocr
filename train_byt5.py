@@ -187,6 +187,7 @@ def main():
     parser.add_argument('--lr', type=float, default=5e-5)
     parser.add_argument('--max_input_length', type=int, default=1024)
     parser.add_argument('--max_target_length', type=int, default=1024)
+    parser.add_argument('--tokenized_data', default=None, help='Path to pre-tokenized dataset cache')
     parser.add_argument('--max_train_samples', type=int, default=None)
     parser.add_argument('--max_eval_samples', type=int, default=None)
     parser.add_argument('--val_split', type=float, default=0.02)
@@ -245,28 +246,34 @@ def main():
     logger.info('Split: train=%d  val=%d  test=%d' % (
         len(raw_datasets['train']), len(raw_datasets['validation']), len(raw_datasets['test'])))
 
-    # Tokenize with caching
-    cache_key = hashlib.md5(
-        f'{os.path.getmtime(args.data)}_{args.model_name}_{args.max_input_length}_{args.max_target_length}_{args.max_train_samples}_{args.max_eval_samples}'.encode()
-    ).hexdigest()
-    cache_dir = os.path.join(os.path.dirname(args.data) or '.', f'.tokenized_cache_{cache_key}')
-
-    if os.path.exists(cache_dir):
-        logger.info(f'Loading tokenized dataset from cache: {cache_dir}')
-        tokenized_datasets = load_from_disk(cache_dir)
+    # Tokenize with caching (cache lives in output_dir on Drive for persistence)
+    tokenized_cache_dir = None
+    if args.tokenized_data:
+        logger.info(f'Loading pre-tokenized dataset: {args.tokenized_data}')
+        tokenized_datasets = load_from_disk(args.tokenized_data)
     else:
-        def _preprocess(examples):
-            return preprocess_function(examples, tokenizer, args)
+        cache_key = hashlib.md5(
+            f'{os.path.getmtime(args.data)}_{args.model_name}_{args.max_input_length}_{args.max_target_length}'.encode()
+        ).hexdigest()
+        tokenized_cache_dir = os.path.join(args.output_dir, f'.tokenized_cache_{cache_key}')
 
-        tokenized_datasets = raw_datasets.map(
-            _preprocess,
-            batched=True,
-            remove_columns=['noisy', 'clean', 'type'],
-            desc='Tokenizing',
-        )
+        if os.path.exists(tokenized_cache_dir):
+            logger.info(f'Loading tokenized dataset from cache: {tokenized_cache_dir}')
+            tokenized_datasets = load_from_disk(tokenized_cache_dir)
+        else:
+            def _preprocess(examples):
+                return preprocess_function(examples, tokenizer, args)
 
-        logger.info(f'Saving tokenized dataset to cache: {cache_dir}')
-        tokenized_datasets.save_to_disk(cache_dir)
+            tokenized_datasets = raw_datasets.map(
+                _preprocess,
+                batched=True,
+                remove_columns=['noisy', 'clean', 'type'],
+                desc='Tokenizing',
+            )
+
+            logger.info(f'Saving tokenized dataset to cache: {tokenized_cache_dir}')
+            os.makedirs(tokenized_cache_dir, exist_ok=True)
+            tokenized_datasets.save_to_disk(tokenized_cache_dir)
 
     if args.max_train_samples:
         tokenized_datasets['train'] = tokenized_datasets['train'].select(range(args.max_train_samples))
