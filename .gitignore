@@ -5,3 +5,9 @@ __pycache__/
 .DS_Store
 *.sublime-*
 .opencode/
+models/
+*.log
+train_log.txt
+train_err.txt
+synthetic_data/
+research_output/

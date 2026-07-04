@@ -23,6 +23,9 @@ from transformers import (
 )
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s | %(message)s')
+_file_handler = logging.FileHandler('train_debug.log', mode='w')
+_file_handler.setFormatter(logging.Formatter('%(asctime)s | %(message)s'))
+logging.getLogger().addHandler(_file_handler)
 logger = logging.getLogger(__name__)
 
 
@@ -118,7 +121,7 @@ class TrainingArguments(Seq2SeqTrainingArguments):
     fp16: bool = field(default=True)
     bf16: bool = field(default=False)
     gradient_checkpointing: bool = field(default=True)
-    optim: str = field(default="adamw_torch_fused")
+    optim: str = field(default="adamw_torch")
     report_to: str = field(default="none")
     dataloader_num_workers: int = field(default=4)
     ddp_find_unused_parameters: Optional[bool] = field(default=None)
@@ -151,7 +154,9 @@ def compute_metrics(eval_preds, tokenizer):
     """Compute CER and WER across all predictions, plus per document type."""
     predictions, labels = eval_preds
 
-    # Decode predictions and labels
+    # Clamp prediction IDs to valid ByT5 range [0, 258] before decoding
+    vocab_size = tokenizer.vocab_size
+    predictions = [[max(0, min(p, vocab_size - 1)) for p in pred] for pred in predictions]
     decoded_preds = tokenizer.batch_decode(predictions, skip_special_tokens=True)
     labels = [[l for l in label if l != -100] for label in labels]
     decoded_labels = tokenizer.batch_decode(labels, skip_special_tokens=True)
@@ -176,10 +181,10 @@ def main():
     parser = argparse.ArgumentParser(description='Fine-tune ByT5 for OCR correction')
     parser.add_argument('--data', default='data/calibrated_100k.jsonl')
     parser.add_argument('--output_dir', default='models/byt5-ocr')
-    parser.add_argument('--model_name', default='google/byt5-base')
-    parser.add_argument('--epochs', type=int, default=3)
+    parser.add_argument('--model_name', default='google/byt5-small')
+    parser.add_argument('--epochs', type=int, default=50)
     parser.add_argument('--batch_size', type=int, default=8)
-    parser.add_argument('--lr', type=float, default=3e-4)
+    parser.add_argument('--lr', type=float, default=1e-4)
     parser.add_argument('--max_input_length', type=int, default=1024)
     parser.add_argument('--max_target_length', type=int, default=1024)
     parser.add_argument('--max_train_samples', type=int, default=None)
@@ -187,13 +192,16 @@ def main():
     parser.add_argument('--val_split', type=float, default=0.02)
     parser.add_argument('--test_split', type=float, default=0.01)
     parser.add_argument('--seed', type=int, default=42)
+    parser.add_argument('--logging_steps', type=int, default=None)
+    parser.add_argument('--patience', type=int, default=5, help='Early stopping patience (eval steps)')
+    parser.add_argument('--no_early_stopping', action='store_true', help='Disable early stopping')
     args = parser.parse_args()
 
     # Device
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     logger.info(f'Device: {device}')
     if torch.cuda.is_available():
-        logger.info(f'GPU: {torch.cuda.get_device_name(0)}  VRAM: {torch.cuda.get_device_properties(0).total_mem / 1e9:.1f}GB')
+        logger.info(f'GPU: {torch.cuda.get_device_name(0)}  VRAM: {torch.cuda.get_device_properties(0).total_memory / 1e9:.1f}GB')
 
     # Load tokenizer and model
     tokenizer_name = args.model_name
@@ -203,7 +211,7 @@ def main():
     logger.info(f'Loading model: {args.model_name}')
     model = AutoModelForSeq2SeqLM.from_pretrained(
         args.model_name,
-        torch_dtype=torch.float16 if torch.cuda.is_available() else torch.float32,
+        torch_dtype=torch.bfloat16 if torch.cuda.is_available() else torch.float32,
         low_cpu_mem_usage=True,
     )
 
@@ -256,7 +264,6 @@ def main():
     # Data collator
     data_collator = DataCollatorForSeq2Seq(
         tokenizer,
-        model=model,
         padding=True,
         pad_to_multiple_of=8,
     )
@@ -271,19 +278,24 @@ def main():
         gradient_accumulation_steps=2,
         warmup_steps=500,
         weight_decay=0.01,
-        logging_steps=100,
+        logging_steps=args.logging_steps if args.logging_steps is not None else 100,
         eval_steps=500,
-        save_steps=1000,
-        save_total_limit=3,
+        save_steps=500,
         predict_with_generate=True,
         generation_max_length=args.max_target_length,
-        generation_num_beams=4,
-        fp16=torch.cuda.is_available(),
-        gradient_checkpointing=True,
-        optim='adamw_torch_fused',
+        generation_num_beams=2,
+        fp16=False,
+        bf16=torch.cuda.is_available(),
+        gradient_checkpointing=False,
+        optim='adamw_torch',
+        max_grad_norm=1.0,
         report_to='none',
-        dataloader_num_workers=4,
+        dataloader_num_workers=0,
         eval_strategy='steps',
+        load_best_model_at_end=not args.no_early_stopping,
+        metric_for_best_model='eval_loss',
+        greater_is_better=False,
+        save_total_limit=3,
         logging_first_step=True,
         remove_unused_columns=False,
     )
@@ -295,13 +307,18 @@ def main():
         train_dataset=tokenized_datasets['train'],
         eval_dataset=tokenized_datasets['validation'],
         data_collator=data_collator,
-        tokenizer=tokenizer,
         compute_metrics=lambda preds: compute_metrics(preds, tokenizer),
+        callbacks=[EarlyStoppingCallback(early_stopping_patience=args.patience)] if not args.no_early_stopping else None,
     )
 
-    # Train
+    # Train (auto-resume from checkpoint if exists)
+    last_checkpoint = None
+    if os.path.isdir(args.output_dir) and any(f.startswith('checkpoint-') for f in os.listdir(args.output_dir)):
+        checkpoints = [d for d in os.listdir(args.output_dir) if d.startswith('checkpoint-')]
+        last_checkpoint = os.path.join(args.output_dir, sorted(checkpoints, key=lambda x: int(x.split('-')[-1]))[-1])
+        logger.info(f'Resuming from checkpoint: {last_checkpoint}')
     logger.info('Starting training...')
-    trainer.train()
+    trainer.train(resume_from_checkpoint=last_checkpoint)
     logger.info('Training complete.')
 
     # Save final model
