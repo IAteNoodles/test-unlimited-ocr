@@ -181,7 +181,7 @@ def main():
     parser = argparse.ArgumentParser(description='Fine-tune ByT5 for OCR correction')
     parser.add_argument('--data', default='data/calibrated_100k.jsonl')
     parser.add_argument('--output_dir', default='models/byt5-ocr')
-    parser.add_argument('--model_name', default='google/byt5-small')
+    parser.add_argument('--model_name', default='google/byt5-base')
     parser.add_argument('--epochs', type=int, default=50)
     parser.add_argument('--batch_size', type=int, default=8)
     parser.add_argument('--lr', type=float, default=1e-4)
