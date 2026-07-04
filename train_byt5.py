@@ -222,7 +222,7 @@ def main():
     # Log model size
     n_params = sum(p.numel() for p in model.parameters())
     n_trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
-logger.info(f'Model params: {n_params:,}  Trainable: {n_trainable:,}')
+    logger.info(f'Model params: {n_params:,}  Trainable: {n_trainable:,}')
 
     raw_datasets = None
 
