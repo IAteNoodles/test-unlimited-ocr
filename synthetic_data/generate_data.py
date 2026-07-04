@@ -50,9 +50,8 @@ from .noise_model import inject_noise, char_error_rate, word_error_rate
 # 1. Constants
 # ---------------------------------------------------------------------------
 
-_DEFAULT_DATADUMP_PATH = (
-    r"C:\Users\Noodl\Projects\FuckAround\MJ\OCRs\H-1\DataDump"
-)
+_SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+_DEFAULT_DATADUMP_PATH = os.path.join(_SCRIPT_DIR, "..", "data")
 
 FORM_MAP = {
     "tablet": "Tab",
