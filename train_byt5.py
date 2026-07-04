@@ -184,7 +184,7 @@ def main():
     parser.add_argument('--model_name', default='google/byt5-base')
     parser.add_argument('--epochs', type=int, default=50)
     parser.add_argument('--batch_size', type=int, default=8)
-    parser.add_argument('--lr', type=float, default=1e-4)
+    parser.add_argument('--lr', type=float, default=5e-5)
     parser.add_argument('--max_input_length', type=int, default=1024)
     parser.add_argument('--max_target_length', type=int, default=1024)
     parser.add_argument('--max_train_samples', type=int, default=None)
