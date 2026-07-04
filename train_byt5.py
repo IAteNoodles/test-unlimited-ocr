@@ -222,36 +222,37 @@ def main():
     # Log model size
     n_params = sum(p.numel() for p in model.parameters())
     n_trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    logger.info(f'Model params: {n_params:,}  Trainable: {n_trainable:,}')
+logger.info(f'Model params: {n_params:,}  Trainable: {n_trainable:,}')
 
-    # Load dataset
-    logger.info(f'Loading dataset: {args.data}')
-    dataset = load_jsonl(args.data)
-    logger.info(f'Total samples: {len(dataset)}')
+    raw_datasets = None
 
-    # Split
-    dataset = dataset.train_test_split(
-        test_size=args.val_split + args.test_split,
-        seed=args.seed,
-    )
-    val_test = dataset['test'].train_test_split(
-        test_size=args.test_split / (args.val_split + args.test_split),
-        seed=args.seed,
-    )
-    raw_datasets = DatasetDict({
-        'train': dataset['train'],
-        'validation': val_test['train'],
-        'test': val_test['test'],
-    })
-    logger.info('Split: train=%d  val=%d  test=%d' % (
-        len(raw_datasets['train']), len(raw_datasets['validation']), len(raw_datasets['test'])))
-
-    # Tokenize with caching (cache lives in output_dir on Drive for persistence)
-    tokenized_cache_dir = None
+    # Load dataset (tokenized or raw)
     if args.tokenized_data:
         logger.info(f'Loading pre-tokenized dataset: {args.tokenized_data}')
         tokenized_datasets = load_from_disk(args.tokenized_data)
     else:
+        logger.info(f'Loading raw dataset: {args.data}')
+        dataset = load_jsonl(args.data)
+        logger.info(f'Total samples: {len(dataset)}')
+
+        # Split
+        dataset = dataset.train_test_split(
+            test_size=args.val_split + args.test_split,
+            seed=args.seed,
+        )
+        val_test = dataset['test'].train_test_split(
+            test_size=args.test_split / (args.val_split + args.test_split),
+            seed=args.seed,
+        )
+        raw_datasets = DatasetDict({
+            'train': dataset['train'],
+            'validation': val_test['train'],
+            'test': val_test['test'],
+        })
+        logger.info('Split: train=%d  val=%d  test=%d' % (
+            len(raw_datasets['train']), len(raw_datasets['validation']), len(raw_datasets['test'])))
+
+        # Tokenize with caching (cache lives in output_dir on Drive for persistence)
         cache_key = hashlib.md5(
             f'{os.path.getmtime(args.data)}_{args.model_name}_{args.max_input_length}_{args.max_target_length}'.encode()
         ).hexdigest()
@@ -351,29 +352,29 @@ def main():
     test_metrics = trainer.evaluate(tokenized_datasets['test'])
     logger.info(f'Test metrics: {json.dumps(test_metrics, indent=2)}')
 
-    # Per-document-type evaluation using raw texts
-    logger.info('Per-document-type evaluation...')
-    test_raw = raw_datasets['test']
-    preds = trainer.predict(tokenized_datasets['test'])
-    decoded_preds = tokenizer.batch_decode(preds.predictions, skip_special_tokens=True)
+    # Per-document-type evaluation using raw texts (only available if tokenized from raw)
+    if raw_datasets is not None:
+        logger.info('Per-document-type evaluation...')
+        test_raw = raw_datasets['test']
+        preds = trainer.predict(tokenized_datasets['test'])
+        decoded_preds = tokenizer.batch_decode(preds.predictions, skip_special_tokens=True)
 
-    # Group by type
-    type_metrics = {}
-    for raw, pred in zip(test_raw, decoded_preds):
-        doc_type = raw.get('type', 'unknown')
-        if doc_type not in type_metrics:
-            type_metrics[doc_type] = {'cers': [], 'wers': []}
-        type_metrics[doc_type]['cers'].append(char_error_rate(raw['clean'], pred))
-        type_metrics[doc_type]['wers'].append(word_error_rate(raw['clean'], pred))
+        type_metrics = {}
+        for raw, pred in zip(test_raw, decoded_preds):
+            doc_type = raw.get('type', 'unknown')
+            if doc_type not in type_metrics:
+                type_metrics[doc_type] = {'cers': [], 'wers': []}
+            type_metrics[doc_type]['cers'].append(char_error_rate(raw['clean'], pred))
+            type_metrics[doc_type]['wers'].append(word_error_rate(raw['clean'], pred))
 
-    logger.info('--- Per-document-type metrics ---')
-    logger.info('%-15s %8s %8s %8s' % ('Type', 'CER', 'WER', 'Count'))
-    logger.info('-' * 40)
-    for doc_type, m in sorted(type_metrics.items()):
-        cers = m['cers']
-        wers = m['wers']
-        logger.info('%-15s %8.4f %8.4f %8d' % (
-            doc_type, sum(cers)/len(cers), sum(wers)/len(wers), len(cers)))
+        logger.info('--- Per-document-type metrics ---')
+        logger.info('%-15s %8s %8s %8s' % ('Type', 'CER', 'WER', 'Count'))
+        logger.info('-' * 40)
+        for doc_type, m in sorted(type_metrics.items()):
+            cers = m['cers']
+            wers = m['wers']
+            logger.info('%-15s %8.4f %8.4f %8d' % (
+                doc_type, sum(cers)/len(cers), sum(wers)/len(wers), len(cers)))
 
     # Run on test set again to print a few examples
     logger.info('\n--- Sample predictions ---')
