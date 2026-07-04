@@ -7,12 +7,12 @@ Usage:
     python train_byt5.py --data data/calibrated_100k.jsonl --output_dir models/byt5-ocr --epochs 3
 """
 
-import json, os, sys, argparse, math, logging
+import json, os, sys, argparse, math, logging, hashlib
 from dataclasses import dataclass, field
 from typing import Optional
 
 import torch
-from datasets import Dataset, DatasetDict, load_dataset
+from datasets import Dataset, DatasetDict, load_dataset, load_from_disk
 from transformers import (
     AutoTokenizer,
     AutoModelForSeq2SeqLM,
@@ -245,16 +245,28 @@ def main():
     logger.info('Split: train=%d  val=%d  test=%d' % (
         len(raw_datasets['train']), len(raw_datasets['validation']), len(raw_datasets['test'])))
 
-    # Tokenize
-    def _preprocess(examples):
-        return preprocess_function(examples, tokenizer, args)
+    # Tokenize with caching
+    cache_key = hashlib.md5(
+        f'{os.path.getmtime(args.data)}_{args.model_name}_{args.max_input_length}_{args.max_target_length}_{args.max_train_samples}_{args.max_eval_samples}'.encode()
+    ).hexdigest()
+    cache_dir = os.path.join(os.path.dirname(args.data) or '.', f'.tokenized_cache_{cache_key}')
 
-    tokenized_datasets = raw_datasets.map(
-        _preprocess,
-        batched=True,
-        remove_columns=['noisy', 'clean', 'type'],
-        desc='Tokenizing',
-    )
+    if os.path.exists(cache_dir):
+        logger.info(f'Loading tokenized dataset from cache: {cache_dir}')
+        tokenized_datasets = load_from_disk(cache_dir)
+    else:
+        def _preprocess(examples):
+            return preprocess_function(examples, tokenizer, args)
+
+        tokenized_datasets = raw_datasets.map(
+            _preprocess,
+            batched=True,
+            remove_columns=['noisy', 'clean', 'type'],
+            desc='Tokenizing',
+        )
+
+        logger.info(f'Saving tokenized dataset to cache: {cache_dir}')
+        tokenized_datasets.save_to_disk(cache_dir)
 
     if args.max_train_samples:
         tokenized_datasets['train'] = tokenized_datasets['train'].select(range(args.max_train_samples))
