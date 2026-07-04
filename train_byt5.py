@@ -230,6 +230,20 @@ def main():
     if args.tokenized_data:
         logger.info(f'Loading pre-tokenized dataset: {args.tokenized_data}')
         tokenized_datasets = load_from_disk(args.tokenized_data)
+        
+        # Split if not already a DatasetDict with train/val/test
+        if not isinstance(tokenized_datasets, DatasetDict) or not all(k in tokenized_datasets for k in ['train', 'validation', 'test']):
+            logger.info('Splitting pre-tokenized dataset...')
+            ds = tokenized_datasets if not isinstance(tokenized_datasets, DatasetDict) else tokenized_datasets.get('train', list(tokenized_datasets.values())[0])
+            ds = ds.train_test_split(test_size=args.val_split + args.test_split, seed=args.seed)
+            val_test = ds['test'].train_test_split(test_size=args.test_split / (args.val_split + args.test_split), seed=args.seed)
+            tokenized_datasets = DatasetDict({
+                'train': ds['train'],
+                'validation': val_test['train'],
+                'test': val_test['test'],
+            })
+            logger.info('Split: train=%d  val=%d  test=%d' % (
+                len(tokenized_datasets['train']), len(tokenized_datasets['validation']), len(tokenized_datasets['test'])))
     else:
         logger.info(f'Loading raw dataset: {args.data}')
         dataset = load_jsonl(args.data)
