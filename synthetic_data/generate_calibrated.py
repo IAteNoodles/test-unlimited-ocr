@@ -95,10 +95,10 @@ def generate_one(args):
     worker_id, pair_idx, datadump_path, use_cache = args
     rng = random.Random(pair_idx * 9973 + worker_id * 7919)
 
-    # Draw target CER from truncated normal
+    # Draw target CER from truncated normal (shifted mean to compensate)
     target = -1.0
     while not (0.09 <= target <= 1.0):
-        target = random.gauss(0.60, 0.20)
+        target = random.gauss(0.64, 0.20)
 
     # Pick noise tier
     profile = _pick_tier(target)
@@ -148,20 +148,37 @@ def generate_one(args):
         clean = LAB_FORMATS[fmt](header, patient, dates, results, panel_key)
         meta = {'type': 'lab_report', 'format': fmt, 'panel': panel_key}
 
-    # Apply noise
+    # Apply noise with retry for CER > 1.0 or CER < 0.09
     doc_seed = rng.randint(0, 2**31)
-    if profile is not None:
-        noisy = inject_noise(clean, profile=profile, seed=doc_seed)
-    else:
-        noisy = inject_noise_custom(clean, seed=doc_seed, **BOOSTED_PARAMS)
+    best_cer = 999.0
+    best_noisy = None
+    best_seed = doc_seed
 
-    actual_cer = cer(clean, noisy)
+    for attempt in range(5):
+        s = doc_seed + attempt * 7919
+        if profile is not None:
+            noisy = inject_noise(clean, profile=profile, seed=s)
+        else:
+            noisy = inject_noise_custom(clean, seed=s, **BOOSTED_PARAMS)
+        actual_cer = cer(clean, noisy)
+
+        if 0.09 <= actual_cer <= 1.0:
+            best_cer = actual_cer
+            best_noisy = noisy
+            best_seed = s
+            break
+
+        # Track best in-range fallback
+        if actual_cer < best_cer:
+            best_cer = actual_cer
+            best_noisy = noisy
+            best_seed = s
 
     return {
         'id': 'pair_%07d' % pair_idx,
         'clean': clean,
-        'noisy': noisy,
-        'cer': round(actual_cer, 4),
+        'noisy': best_noisy,
+        'cer': round(best_cer, 4),
         'target_cer': round(target, 4),
         'tier': profile if profile else 'boosted',
         **meta,
