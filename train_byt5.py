@@ -68,6 +68,33 @@ def word_error_rate(gt, pred):
 # 2. Data loading
 # ---------------------------------------------------------------------------
 
+class InMemoryTensorDataset(torch.utils.data.Dataset):
+    """Loads HF Dataset into contiguous CPU tensors at init — zero I/O per batch.
+
+    Stores all tokens in flat 1D tensors + offset arrays for O(1) indexing.
+    ~1.6GB per column (400k rows × avg 500 tokens × 8 bytes).
+    """
+    def __init__(self, hf_dataset, columns=('input_ids', 'attention_mask', 'labels')):
+        self.columns = columns
+        self.data = {}
+        self.offsets = {}
+        for col in columns:
+            rows = [row[col] for row in hf_dataset]
+            lengths = torch.tensor([len(r) for r in rows], dtype=torch.long)
+            self.offsets[col] = torch.zeros(len(rows) + 1, dtype=torch.long)
+            self.offsets[col][1:] = lengths.cumsum(0)
+            self.data[col] = torch.cat([torch.as_tensor(r, dtype=torch.long) for r in rows])
+
+    def __len__(self):
+        return len(self.offsets[self.columns[0]]) - 1
+
+    def __getitem__(self, idx):
+        return {
+            col: self.data[col][self.offsets[col][idx]:self.offsets[col][idx + 1]]
+            for col in self.columns
+        }
+
+
 def load_jsonl(path, max_samples=None):
     """Load JSONL file. Each line: {'noisy': ..., 'clean': ..., 'type': ...}"""
     data = {'noisy': [], 'clean': [], 'type': []}
@@ -181,7 +208,7 @@ def main():
     parser = argparse.ArgumentParser(description='Fine-tune ByT5 for OCR correction')
     parser.add_argument('--data', default='data/calibrated_100k.jsonl')
     parser.add_argument('--output_dir', default='models/byt5-ocr')
-    parser.add_argument('--model_name', default='google/byt5-base')
+    parser.add_argument('--model_name', default='google/byt5-small')
     parser.add_argument('--epochs', type=int, default=50)
     parser.add_argument('--batch_size', type=int, default=16)
     parser.add_argument('--lr', type=float, default=5e-5)
@@ -198,6 +225,7 @@ def main():
     parser.add_argument('--no_early_stopping', action='store_true', help='Disable early stopping')
     parser.add_argument('--gradient_checkpointing', action='store_true', help='Enable gradient checkpointing (slower but less VRAM)')
     parser.add_argument('--dataloader_num_workers', type=int, default=0, help='Dataloader worker processes (2+ for prefetching)')
+    parser.add_argument('--in_memory', action='store_true', help='Load all tokenized data into RAM tensors (zero I/O per batch)')
     args = parser.parse_args()
 
     # Device
@@ -331,6 +359,12 @@ def main():
         tokenized_datasets['train'] = tokenized_datasets['train'].select(range(args.max_train_samples))
     if args.max_eval_samples:
         tokenized_datasets['validation'] = tokenized_datasets['validation'].select(range(args.max_eval_samples))
+
+    # Load into CPU RAM tensors if --in_memory (eliminates Arrow per-batch I/O)
+    if args.in_memory:
+        logger.info('Loading tokenized data into CPU RAM tensors...')
+        for split in ['train', 'validation', 'test']:
+            tokenized_datasets[split] = InMemoryTensorDataset(tokenized_datasets[split])
 
     # Data collator
     data_collator = DataCollatorForSeq2Seq(
