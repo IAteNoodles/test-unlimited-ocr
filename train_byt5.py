@@ -183,7 +183,7 @@ def main():
     parser.add_argument('--output_dir', default='models/byt5-ocr')
     parser.add_argument('--model_name', default='google/byt5-base')
     parser.add_argument('--epochs', type=int, default=50)
-    parser.add_argument('--batch_size', type=int, default=8)
+    parser.add_argument('--batch_size', type=int, default=16)
     parser.add_argument('--lr', type=float, default=5e-5)
     parser.add_argument('--max_input_length', type=int, default=1024)
     parser.add_argument('--max_target_length', type=int, default=1024)
@@ -196,6 +196,8 @@ def main():
     parser.add_argument('--logging_steps', type=int, default=None)
     parser.add_argument('--patience', type=int, default=5, help='Early stopping patience (eval steps)')
     parser.add_argument('--no_early_stopping', action='store_true', help='Disable early stopping')
+    parser.add_argument('--gradient_checkpointing', action='store_true', help='Enable gradient checkpointing (slower but less VRAM)')
+    parser.add_argument('--dataloader_num_workers', type=int, default=0, help='Dataloader worker processes (2+ for prefetching)')
     args = parser.parse_args()
 
     # Device
@@ -333,11 +335,11 @@ def main():
         generation_num_beams=2,
         fp16=False,
         bf16=torch.cuda.is_available(),
-        gradient_checkpointing=False,
+        gradient_checkpointing=args.gradient_checkpointing,
         optim='adamw_torch',
         max_grad_norm=1.0,
         report_to='none',
-        dataloader_num_workers=0,
+        dataloader_num_workers=args.dataloader_num_workers,
         eval_strategy='steps',
         load_best_model_at_end=not args.no_early_stopping,
         metric_for_best_model='eval_loss',
