@@ -12,7 +12,7 @@ from dataclasses import dataclass, field
 from typing import Optional
 
 import torch
-from datasets import Dataset, DatasetDict, load_dataset, load_from_disk
+from datasets import Dataset, DatasetDict, concatenate_datasets, load_dataset, load_from_disk
 from transformers import (
     AutoTokenizer,
     AutoModelForSeq2SeqLM,
@@ -233,24 +233,46 @@ def main():
         logger.info(f'Loading pre-tokenized dataset: {args.tokenized_data}')
         tokenized_datasets = load_from_disk(args.tokenized_data)
         
-        # Remove unexpected columns
-        for split in list(tokenized_datasets.keys()):
-            cols = tokenized_datasets[split].column_names
-            keep = [c for c in cols if c in ['input_ids', 'attention_mask', 'labels']]
-            if len(keep) != len(cols):
-                tokenized_datasets[split] = tokenized_datasets[split].remove_columns([c for c in cols if c not in keep])
-        
-        # Split if not already a DatasetDict with train/val/test
-        if not isinstance(tokenized_datasets, DatasetDict) or not all(k in tokenized_datasets for k in ['train', 'validation', 'test']):
+        # Handle plain Dataset (not DatasetDict) — clean columns then split
+        if not isinstance(tokenized_datasets, DatasetDict):
+            logger.info('Single dataset loaded, removing extra columns...')
+            keep = [c for c in tokenized_datasets.column_names if c in ['input_ids', 'attention_mask', 'labels']]
+            if len(keep) != len(tokenized_datasets.column_names):
+                tokenized_datasets = tokenized_datasets.remove_columns([c for c in tokenized_datasets.column_names if c not in keep])
             logger.info('Splitting pre-tokenized dataset...')
-            ds = tokenized_datasets if not isinstance(tokenized_datasets, DatasetDict) else tokenized_datasets.get('train', list(tokenized_datasets.values())[0])
-            ds = ds.train_test_split(test_size=args.val_split + args.test_split, seed=args.seed)
+            ds = tokenized_datasets.train_test_split(test_size=args.val_split + args.test_split, seed=args.seed)
             val_test = ds['test'].train_test_split(test_size=args.test_split / (args.val_split + args.test_split), seed=args.seed)
             tokenized_datasets = DatasetDict({
                 'train': ds['train'],
                 'validation': val_test['train'],
                 'test': val_test['test'],
             })
+        else:
+            # Already a DatasetDict — clean columns per split
+            missing_splits = [k for k in ['train', 'validation', 'test'] if k not in tokenized_datasets]
+            if missing_splits:
+                # Has keys but not the expected ones — merge, clean, re-split
+                logger.info(f'Missing splits {missing_splits}, re-splitting...')
+                merged = None
+                for split in tokenized_datasets.keys():
+                    keep = [c for c in tokenized_datasets[split].column_names if c in ['input_ids', 'attention_mask', 'labels']]
+                    ds = tokenized_datasets[split]
+                    if len(keep) != len(ds.column_names):
+                        ds = ds.remove_columns([c for c in ds.column_names if c not in keep])
+                    merged = ds if merged is None else concatenate_datasets([merged, ds])
+                ds = merged.train_test_split(test_size=args.val_split + args.test_split, seed=args.seed)
+                val_test = ds['test'].train_test_split(test_size=args.test_split / (args.val_split + args.test_split), seed=args.seed)
+                tokenized_datasets = DatasetDict({
+                    'train': ds['train'],
+                    'validation': val_test['train'],
+                    'test': val_test['test'],
+                })
+            else:
+                for split in ['train', 'validation', 'test']:
+                    cols = tokenized_datasets[split].column_names
+                    keep = [c for c in cols if c in ['input_ids', 'attention_mask', 'labels']]
+                    if len(keep) != len(cols):
+                        tokenized_datasets[split] = tokenized_datasets[split].remove_columns([c for c in cols if c not in keep])
             logger.info('Split: train=%d  val=%d  test=%d' % (
                 len(tokenized_datasets['train']), len(tokenized_datasets['validation']), len(tokenized_datasets['test'])))
     else:
