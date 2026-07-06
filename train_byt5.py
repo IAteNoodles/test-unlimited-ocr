@@ -179,16 +179,16 @@ def preprocess_function(examples, tokenizer, data_args):
     return model_inputs
 
 
-_eval_step_counter = 0
+_eval_num = 0
 
 def make_compute_metrics(tokenizer, save_preds_path=None, eval_raw=None):
     """Factory: returns a compute_metrics function that optionally saves predictions.
 
-    eval_raw: list of dicts with 'noisy' and 'clean' keys (parallel to eval dataset).
+    eval_raw: list/dataset of dicts with 'noisy' and 'clean' keys (parallel to eval dataset).
     """
     def compute_metrics(eval_preds):
-        global _eval_step_counter
-        _eval_step_counter += 1
+        global _eval_num
+        _eval_num += 1
 
         predictions, labels = eval_preds
 
@@ -210,14 +210,12 @@ def make_compute_metrics(tokenizer, save_preds_path=None, eval_raw=None):
             'cer_std': (sum((c - sum(cers)/len(cers))**2 for c in cers) / len(cers))**0.5 if cers else 0.0,
         }
 
-        # Save predictions to JSONL if requested
         if save_preds_path and eval_raw is not None:
-            step = getattr(_eval_step_counter, 'step', _eval_step_counter)
             with open(save_preds_path, 'a', encoding='utf-8') as f:
                 for i, (pred, clean) in enumerate(zip(decoded_preds, decoded_labels)):
-                    noisy = eval_raw[i].get('noisy', '') if i < len(eval_raw) else ''
+                    noisy = eval_raw[i]['noisy'] if i < len(eval_raw) else ''
                     record = {
-                        'eval_num': _eval_step_counter,
+                        'eval_num': _eval_num,
                         'cer': cers[i] if i < len(cers) else -1,
                         'noisy': noisy,
                         'clean': clean,
@@ -409,7 +407,15 @@ def main():
     if args.max_eval_samples:
         tokenized_datasets['validation'] = tokenized_datasets['validation'].select(range(args.max_eval_samples))
 
-    # Load into CPU RAM tensors if --in_memory (eliminates Arrow per-batch I/O)
+    # Capture raw eval texts for prediction saving (must be after max_eval_samples slice)
+    eval_raw = None
+    if args.save_preds and raw_datasets is not None:
+        raw_val = raw_datasets['validation']
+        if args.max_eval_samples:
+            raw_val = raw_val.select(range(args.max_eval_samples))
+        eval_raw = raw_val
+    elif args.save_preds:
+        logger.warning('--save_preds requested but raw texts unavailable (using tokenized data); saving predictions only')
     if args.in_memory:
         logger.info('Loading tokenized data into CPU RAM tensors...')
         for split in ['train', 'validation', 'test']:
@@ -453,13 +459,6 @@ def main():
         logging_first_step=True,
         remove_unused_columns=False,
     )
-
-    # Capture raw eval texts for prediction saving
-    eval_raw = None
-    if args.save_preds and raw_datasets is not None:
-        eval_raw = raw_datasets['validation']
-    elif args.save_preds:
-        logger.warning('--save_preds requested but raw texts unavailable (using tokenized data); saving predictions only')
 
     # Trainer
     trainer = Seq2SeqTrainer(
