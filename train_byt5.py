@@ -72,19 +72,20 @@ def word_error_rate(gt, pred):
 class InMemoryTensorDataset(torch.utils.data.Dataset):
     """Loads HF Dataset into contiguous CPU tensors at init — zero I/O per batch.
 
+    Extracts columns in bulk (not row-by-row) to avoid Arrow per-row overhead.
     Stores all tokens in flat 1D tensors + offset arrays for O(1) indexing.
-    ~1.6GB per column (400k rows × avg 500 tokens × 8 bytes).
     """
     def __init__(self, hf_dataset, columns=('input_ids', 'attention_mask', 'labels')):
         self.columns = columns
         self.data = {}
         self.offsets = {}
         for col in columns:
-            rows = [row[col] for row in hf_dataset]
-            lengths = torch.tensor([len(r) for r in rows], dtype=torch.long)
-            self.offsets[col] = torch.zeros(len(rows) + 1, dtype=torch.long)
+            all_rows = hf_dataset[col]  # bulk extract: list of lists
+            lengths = torch.tensor([len(r) for r in all_rows], dtype=torch.long)
+            self.offsets[col] = torch.zeros(len(all_rows) + 1, dtype=torch.long)
             self.offsets[col][1:] = lengths.cumsum(0)
-            self.data[col] = torch.cat([torch.as_tensor(r, dtype=torch.long) for r in rows])
+            self.data[col] = torch.cat([torch.as_tensor(r, dtype=torch.long) for r in all_rows])
+        del all_rows
 
     def __len__(self):
         return len(self.offsets[self.columns[0]]) - 1
@@ -211,7 +212,7 @@ def main():
     parser.add_argument('--output_dir', default='models/byt5-ocr')
     parser.add_argument('--model_name', default='google/byt5-small')
     parser.add_argument('--epochs', type=int, default=50)
-    parser.add_argument('--batch_size', type=int, default=16)
+    parser.add_argument('--batch_size', type=int, default=8)
     parser.add_argument('--lr', type=float, default=5e-5)
     parser.add_argument('--max_input_length', type=int, default=1024)
     parser.add_argument('--max_target_length', type=int, default=1024)
@@ -248,7 +249,7 @@ def main():
     logger.info(f'Loading model: {args.model_name}')
     model = AutoModelForSeq2SeqLM.from_pretrained(
         args.model_name,
-        torch_dtype=torch.bfloat16 if torch.cuda.is_available() else torch.float32,
+        dtype=torch.bfloat16 if torch.cuda.is_available() else torch.float32,
         low_cpu_mem_usage=True,
     )
 
