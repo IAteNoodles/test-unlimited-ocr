@@ -13,6 +13,7 @@ from typing import Optional
 
 import torch
 from datasets import Dataset, DatasetDict, concatenate_datasets, load_dataset, load_from_disk
+from peft import LoraConfig, get_peft_model, TaskType
 from transformers import (
     AutoTokenizer,
     AutoModelForSeq2SeqLM,
@@ -226,6 +227,11 @@ def main():
     parser.add_argument('--gradient_checkpointing', action='store_true', help='Enable gradient checkpointing (slower but less VRAM)')
     parser.add_argument('--dataloader_num_workers', type=int, default=0, help='Dataloader worker processes (2+ for prefetching)')
     parser.add_argument('--in_memory', action='store_true', help='Load all tokenized data into RAM tensors (zero I/O per batch)')
+    parser.add_argument('--lora', action='store_true', help='Use LoRA instead of full fine-tuning')
+    parser.add_argument('--lora_r', type=int, default=8, help='LoRA rank')
+    parser.add_argument('--lora_alpha', type=int, default=16, help='LoRA alpha')
+    parser.add_argument('--lora_dropout', type=float, default=0.1, help='LoRA dropout')
+    parser.add_argument('--lora_target_modules', nargs='+', default=['q', 'v'], help='LoRA target modules for T5')
     args = parser.parse_args()
 
     # Device
@@ -246,8 +252,24 @@ def main():
         low_cpu_mem_usage=True,
     )
 
-    # Enable gradient checkpointing
+    # Apply LoRA if requested (freezes base weights, only adapter params trainable)
+    if args.lora:
+        logger.info(f'Applying LoRA (r={args.lora_r}, alpha={args.lora_alpha}, dropout={args.lora_dropout})')
+        lora_config = LoraConfig(
+            task_type=TaskType.SEQ_2_SEQ_LM,
+            r=args.lora_r,
+            lora_alpha=args.lora_alpha,
+            lora_dropout=args.lora_dropout,
+            target_modules=args.lora_target_modules,
+        )
+        model = get_peft_model(model, lora_config)
+        logger.info(f'LoRA trainable params: {model.num_parameters(only_trainable=True):,} / {model.num_parameters():,}')
+
+    # Enable gradient checkpointing (disable KV cache first)
+    model.config.use_cache = False
     model.gradient_checkpointing_enable()
+    if hasattr(model, 'enable_input_require_grads'):
+        model.enable_input_require_grads()
 
     # Log model size
     n_params = sum(p.numel() for p in model.parameters())
