@@ -228,10 +228,10 @@ def main():
     parser.add_argument('--dataloader_num_workers', type=int, default=0, help='Dataloader worker processes (2+ for prefetching)')
     parser.add_argument('--in_memory', action='store_true', help='Load all tokenized data into RAM tensors (zero I/O per batch)')
     parser.add_argument('--lora', action='store_true', help='Use LoRA instead of full fine-tuning')
-    parser.add_argument('--lora_r', type=int, default=8, help='LoRA rank')
-    parser.add_argument('--lora_alpha', type=int, default=16, help='LoRA alpha')
+    parser.add_argument('--lora_r', type=int, default=16, help='LoRA rank')
+    parser.add_argument('--lora_alpha', type=int, default=32, help='LoRA alpha (typically 2x r)')
     parser.add_argument('--lora_dropout', type=float, default=0.1, help='LoRA dropout')
-    parser.add_argument('--lora_target_modules', nargs='+', default=['q', 'v'], help='LoRA target modules for T5')
+    parser.add_argument('--lora_target_modules', nargs='+', default=['q', 'v', 'o', 'wo', 'wi'], help='LoRA target modules for T5')
     args = parser.parse_args()
 
     # Device
