@@ -179,31 +179,55 @@ def preprocess_function(examples, tokenizer, data_args):
     return model_inputs
 
 
-def compute_metrics(eval_preds, tokenizer):
-    """Compute CER and WER across all predictions, plus per document type."""
-    predictions, labels = eval_preds
+_eval_step_counter = 0
 
-    # Clamp prediction IDs to valid ByT5 range [0, 258] before decoding
-    vocab_size = tokenizer.vocab_size
-    predictions = [[max(0, min(p, vocab_size - 1)) for p in pred] for pred in predictions]
-    decoded_preds = tokenizer.batch_decode(predictions, skip_special_tokens=True)
-    labels = [[l for l in label if l != -100] for label in labels]
-    decoded_labels = tokenizer.batch_decode(labels, skip_special_tokens=True)
+def make_compute_metrics(tokenizer, save_preds_path=None, eval_raw=None):
+    """Factory: returns a compute_metrics function that optionally saves predictions.
 
-    # Overall CER/WER
-    cers = []
-    wers = []
-    for pred, label in zip(decoded_preds, decoded_labels):
-        cers.append(char_error_rate(label, pred))
-        wers.append(word_error_rate(label, pred))
+    eval_raw: list of dicts with 'noisy' and 'clean' keys (parallel to eval dataset).
+    """
+    def compute_metrics(eval_preds):
+        global _eval_step_counter
+        _eval_step_counter += 1
 
-    metrics = {
-        'cer': sum(cers) / len(cers) if cers else 0.0,
-        'wer': sum(wers) / len(wers) if wers else 0.0,
-        'cer_std': (sum((c - sum(cers)/len(cers))**2 for c in cers) / len(cers))**0.5 if cers else 0.0,
-    }
+        predictions, labels = eval_preds
 
-    return metrics
+        vocab_size = tokenizer.vocab_size
+        predictions = [[max(0, min(p, vocab_size - 1)) for p in pred] for pred in predictions]
+        decoded_preds = tokenizer.batch_decode(predictions, skip_special_tokens=True)
+        labels_clean = [[l for l in label if l != -100] for label in labels]
+        decoded_labels = tokenizer.batch_decode(labels_clean, skip_special_tokens=True)
+
+        cers = []
+        wers = []
+        for pred, label in zip(decoded_preds, decoded_labels):
+            cers.append(char_error_rate(label, pred))
+            wers.append(word_error_rate(label, pred))
+
+        metrics = {
+            'cer': sum(cers) / len(cers) if cers else 0.0,
+            'wer': sum(wers) / len(wers) if wers else 0.0,
+            'cer_std': (sum((c - sum(cers)/len(cers))**2 for c in cers) / len(cers))**0.5 if cers else 0.0,
+        }
+
+        # Save predictions to JSONL if requested
+        if save_preds_path and eval_raw is not None:
+            step = getattr(_eval_step_counter, 'step', _eval_step_counter)
+            with open(save_preds_path, 'a', encoding='utf-8') as f:
+                for i, (pred, clean) in enumerate(zip(decoded_preds, decoded_labels)):
+                    noisy = eval_raw[i].get('noisy', '') if i < len(eval_raw) else ''
+                    record = {
+                        'eval_num': _eval_step_counter,
+                        'cer': cers[i] if i < len(cers) else -1,
+                        'noisy': noisy,
+                        'clean': clean,
+                        'pred': pred,
+                    }
+                    f.write(json.dumps(record, ensure_ascii=False) + '\n')
+
+        return metrics
+
+    return compute_metrics
 
 
 def main():
@@ -234,6 +258,7 @@ def main():
     parser.add_argument('--lora_alpha', type=int, default=32, help='LoRA alpha (typically 2x r)')
     parser.add_argument('--lora_dropout', type=float, default=0.1, help='LoRA dropout')
     parser.add_argument('--lora_target_modules', nargs='+', default=['q', 'v', 'o', 'wo', 'wi'], help='LoRA target modules for T5')
+    parser.add_argument('--save_preds', default=None, help='Save eval predictions to this JSONL file (appends each eval)')
     args = parser.parse_args()
 
     # Device
@@ -429,6 +454,13 @@ def main():
         remove_unused_columns=False,
     )
 
+    # Capture raw eval texts for prediction saving
+    eval_raw = None
+    if args.save_preds and raw_datasets is not None:
+        eval_raw = raw_datasets['validation']
+    elif args.save_preds:
+        logger.warning('--save_preds requested but raw texts unavailable (using tokenized data); saving predictions only')
+
     # Trainer
     trainer = Seq2SeqTrainer(
         model=model,
@@ -436,7 +468,7 @@ def main():
         train_dataset=tokenized_datasets['train'],
         eval_dataset=tokenized_datasets['validation'],
         data_collator=data_collator,
-        compute_metrics=lambda preds: compute_metrics(preds, tokenizer),
+        compute_metrics=make_compute_metrics(tokenizer, args.save_preds, eval_raw),
         callbacks=[EarlyStoppingCallback(early_stopping_patience=args.patience)] if not args.no_early_stopping else None,
     )
 
