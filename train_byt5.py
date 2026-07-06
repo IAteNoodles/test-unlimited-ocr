@@ -223,6 +223,7 @@ def main():
     parser.add_argument('--test_split', type=float, default=0.01)
     parser.add_argument('--seed', type=int, default=42)
     parser.add_argument('--logging_steps', type=int, default=None)
+    parser.add_argument('--eval_steps', type=int, default=500, help='Evaluate every N training steps')
     parser.add_argument('--patience', type=int, default=5, help='Early stopping patience (eval steps)')
     parser.add_argument('--no_early_stopping', action='store_true', help='Disable early stopping')
     parser.add_argument('--gradient_checkpointing', action='store_true', help='Enable gradient checkpointing (slower but less VRAM)')
@@ -407,8 +408,8 @@ def main():
         warmup_steps=500,
         weight_decay=0.01,
         logging_steps=args.logging_steps if args.logging_steps is not None else 100,
-        eval_steps=500,
-        save_steps=500,
+        eval_steps=args.eval_steps,
+        save_steps=args.eval_steps,
         predict_with_generate=True,
         generation_max_length=args.max_target_length,
         generation_num_beams=2,
