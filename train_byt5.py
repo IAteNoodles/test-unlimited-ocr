@@ -57,6 +57,80 @@ def char_error_rate(gt, pred):
     return _levenshtein(gt, pred) / len(gt)
 
 
+def _char_ngrams(s, n):
+    """Extract character n-grams from string."""
+    return [s[i:i+n] for i in range(max(0, len(s) - n + 1))]
+
+
+def _word_ngrams(s, n):
+    """Extract word n-grams from string."""
+    words = s.split()
+    return [' '.join(words[i:i+n]) for i in range(max(0, len(words) - n + 1))]
+
+
+def chr_f_score(gt, pred, beta=1, n=6):
+    """chrF (character n-gram F-score)."""
+    if not gt or not pred:
+        return 0.0
+    prec_sum = 0.0
+    rec_sum = 0.0
+    for i in range(1, n + 1):
+        gt_ngrams = _char_ngrams(gt, i)
+        pred_ngrams = _char_ngrams(pred, i)
+        if not gt_ngrams or not pred_ngrams:
+            continue
+        common = 0
+        gt_counts = {}
+        for ng in gt_ngrams:
+            gt_counts[ng] = gt_counts.get(ng, 0) + 1
+        pred_counts = {}
+        for ng in pred_ngrams:
+            pred_counts[ng] = pred_counts.get(ng, 0) + 1
+        for ng, c in pred_counts.items():
+            common += min(c, gt_counts.get(ng, 0))
+        prec_sum += common / len(pred_ngrams)
+        rec_sum += common / len(gt_ngrams)
+    prec = prec_sum / n
+    rec = rec_sum / n
+    if prec + rec == 0:
+        return 0.0
+    beta2 = beta * beta
+    return (1 + beta2) * prec * rec / (beta2 * prec + rec)
+
+
+def chr_f_plus_plus(gt, pred, beta=2, char_n=6, word_n=2):
+    """chrF++: chrF with word n-grams (n=1,2), recall-weighted (β=2)."""
+    char_score = chr_f_score(gt, pred, beta=1, n=char_n)
+    if not gt or not pred:
+        return char_score
+    word_prec = 0.0
+    word_rec = 0.0
+    for i in range(1, word_n + 1):
+        gt_ngrams = _word_ngrams(gt, i)
+        pred_ngrams = _word_ngrams(pred, i)
+        if not gt_ngrams or not pred_ngrams:
+            continue
+        common = 0
+        gt_counts = {}
+        for ng in gt_ngrams:
+            gt_counts[ng] = gt_counts.get(ng, 0) + 1
+        pred_counts = {}
+        for ng in pred_ngrams:
+            pred_counts[ng] = pred_counts.get(ng, 0) + 1
+        for ng, c in pred_counts.items():
+            common += min(c, gt_counts.get(ng, 0))
+        word_prec += common / len(pred_ngrams) if pred_ngrams else 0
+        word_rec += common / len(gt_ngrams) if gt_ngrams else 0
+    w_prec = word_prec / word_n
+    w_rec = word_rec / word_n
+    if w_prec + w_rec > 0:
+        w_f = 2 * w_prec * w_rec / (w_prec + w_rec)
+    else:
+        w_f = 0.0
+    beta2 = beta * beta
+    return (char_score + beta2 * w_f) / (1 + beta2)
+
+
 def word_error_rate(gt, pred):
     gt_words = gt.split()
     pred_words = pred.split()
@@ -200,14 +274,21 @@ def make_compute_metrics(tokenizer, save_preds_path=None, eval_raw=None):
 
         cers = []
         wers = []
+        chrfs = []
+        chrfs_pp = []
         for pred, label in zip(decoded_preds, decoded_labels):
             cers.append(char_error_rate(label, pred))
             wers.append(word_error_rate(label, pred))
+            chrfs.append(chr_f_score(label, pred))
+            chrfs_pp.append(chr_f_plus_plus(label, pred))
 
+        n = len(cers)
         metrics = {
-            'cer': sum(cers) / len(cers) if cers else 0.0,
-            'wer': sum(wers) / len(wers) if wers else 0.0,
-            'cer_std': (sum((c - sum(cers)/len(cers))**2 for c in cers) / len(cers))**0.5 if cers else 0.0,
+            'cer': sum(cers) / n if n else 0.0,
+            'wer': sum(wers) / n if n else 0.0,
+            'cer_std': (sum((c - sum(cers)/n)**2 for c in cers) / n)**0.5 if n else 0.0,
+            'chrF': sum(chrfs) / n if n else 0.0,
+            'chrF++': sum(chrfs_pp) / n if n else 0.0,
         }
 
         if save_preds_path and eval_raw is not None:
@@ -217,6 +298,8 @@ def make_compute_metrics(tokenizer, save_preds_path=None, eval_raw=None):
                     record = {
                         'eval_num': _eval_num,
                         'cer': cers[i] if i < len(cers) else -1,
+                        'chrF': chrfs[i] if i < len(chrfs) else -1,
+                        'chrF++': chrfs_pp[i] if i < len(chrfs_pp) else -1,
                         'noisy': noisy,
                         'clean': clean,
                         'pred': pred,
@@ -257,6 +340,8 @@ def main():
     parser.add_argument('--lora_dropout', type=float, default=0.1, help='LoRA dropout')
     parser.add_argument('--lora_target_modules', nargs='+', default=['q', 'v', 'o', 'wo', 'wi'], help='LoRA target modules for T5')
     parser.add_argument('--save_preds', default=None, help='Save eval predictions to this JSONL file (appends each eval)')
+    parser.add_argument('--repetition_penalty', type=float, default=1.2, help='Penalty for repeating tokens during generation')
+    parser.add_argument('--no_repeat_ngram_size', type=int, default=3, help='Prevent repeating any N-gram during generation')
     args = parser.parse_args()
 
     # Device
@@ -289,6 +374,10 @@ def main():
         )
         model = get_peft_model(model, lora_config)
         logger.info(f'LoRA trainable params: {model.num_parameters(only_trainable=True):,} / {model.num_parameters():,}')
+
+    # Set generation config (affects eval predictions)
+    model.generation_config.repetition_penalty = args.repetition_penalty
+    model.generation_config.no_repeat_ngram_size = args.no_repeat_ngram_size
 
     # Enable gradient checkpointing (disable KV cache first)
     model.config.use_cache = False
